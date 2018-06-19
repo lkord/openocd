@@ -739,5 +739,4 @@ struct flash_driver atsamv_flash = {
 	.erase_check = default_flash_blank_check,
 	.protect_check = samv_protect_check,
 	.info = samv_get_info,
-	.free_driver_priv = default_flash_free_driver_priv,
 };

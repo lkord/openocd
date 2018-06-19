@@ -22,11 +22,7 @@
 #ifndef OPENOCD_HELPER_COMMAND_H
 #define OPENOCD_HELPER_COMMAND_H
 
-#include <stdint.h>
-#include <stdbool.h>
 #include <jim-nvp.h>
-
-#include <helper/types.h>
 
 /* To achieve C99 printf compatibility in MinGW, gnu_printf should be
  * used for __attribute__((format( ... ))), with GCC v4.4 or later
@@ -53,15 +49,7 @@ struct command_context {
 	Jim_Interp *interp;
 	enum command_mode mode;
 	struct command *commands;
-	struct target *current_target;
-		/* The target set by 'targets xx' command or the latest created */
-	struct target *current_target_override;
-		/* If set overrides current_target
-		 * It happens during processing of
-		 *	1) a target prefixed command
-		 *	2) an event handler
-		 * Pay attention to reentrancy when setting override.
-		 */
+	int current_target;
 	command_output_handler_t output_handler;
 	void *output_handler_priv;
 };
@@ -180,11 +168,6 @@ struct command {
 	command_handler_t handler;
 	Jim_CmdProc *jim_handler;
 	void *jim_handler_data;
-		/* Currently used only for target of target-prefixed cmd.
-		 * Native OpenOCD commands use jim_handler_data exclusively
-		 * as a target override.
-		 * Jim handlers outside of target cmd tree can use
-		 * jim_handler_data for any handler specific data */
 	enum command_mode mode;
 	struct command *next;
 };

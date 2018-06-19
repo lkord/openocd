@@ -54,7 +54,7 @@
 #include "target_type.h"
 #include "arm_opcodes.h"
 #include "arm_semihosting.h"
-#include "transport/transport.h"
+#include "jtag/swd.h"
 #include <helper/time_support.h>
 
 static int cortex_a_poll(struct target *target);
@@ -2947,6 +2947,12 @@ static int cortex_a_examine_first(struct target *target)
 	int retval = ERROR_OK;
 	uint32_t didr, cpuid, dbg_osreg;
 
+	retval = dap_dp_init(swjdp);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Could not initialize the debug port");
+		return retval;
+	}
+
 	/* Search for the APB-AP - it is needed for access to debug registers */
 	retval = dap_find_ap(swjdp, AP_TYPE_APB_AP, &armv7a->debug_ap);
 	if (retval != ERROR_OK) {
@@ -3128,13 +3134,22 @@ static int cortex_a_init_target(struct command_context *cmd_ctx,
 }
 
 static int cortex_a_init_arch_info(struct target *target,
-	struct cortex_a_common *cortex_a, struct adiv5_dap *dap)
+	struct cortex_a_common *cortex_a, struct jtag_tap *tap)
 {
 	struct armv7a_common *armv7a = &cortex_a->armv7a_common;
 
 	/* Setup struct cortex_a_common */
 	cortex_a->common_magic = CORTEX_A_COMMON_MAGIC;
-	armv7a->arm.dap = dap;
+
+	/*  tap has no dap initialized */
+	if (!tap->dap) {
+		tap->dap = dap_init();
+
+		/* Leave (only) generic DAP stuff for debugport_init() */
+		tap->dap->tap = tap;
+	}
+
+	armv7a->arm.dap = tap->dap;
 
 	cortex_a->fast_reg_read = 0;
 
@@ -3160,34 +3175,19 @@ static int cortex_a_init_arch_info(struct target *target,
 static int cortex_a_target_create(struct target *target, Jim_Interp *interp)
 {
 	struct cortex_a_common *cortex_a = calloc(1, sizeof(struct cortex_a_common));
-	cortex_a->common_magic = CORTEX_A_COMMON_MAGIC;
-	struct adiv5_private_config *pc;
-
-	if (target->private_config == NULL)
-		return ERROR_FAIL;
-
-	pc = (struct adiv5_private_config *)target->private_config;
 
 	cortex_a->armv7a_common.is_armv7r = false;
 
-	cortex_a->armv7a_common.arm.arm_vfp_version = ARM_VFP_V3;
-
-	return cortex_a_init_arch_info(target, cortex_a, pc->dap);
+	return cortex_a_init_arch_info(target, cortex_a, target->tap);
 }
 
 static int cortex_r4_target_create(struct target *target, Jim_Interp *interp)
 {
 	struct cortex_a_common *cortex_a = calloc(1, sizeof(struct cortex_a_common));
-	cortex_a->common_magic = CORTEX_A_COMMON_MAGIC;
-	struct adiv5_private_config *pc;
-
-	pc = (struct adiv5_private_config *)target->private_config;
-	if (adiv5_verify_config(pc) != ERROR_OK)
-		return ERROR_FAIL;
 
 	cortex_a->armv7a_common.is_armv7r = true;
 
-	return cortex_a_init_arch_info(target, cortex_a, pc->dap);
+	return cortex_a_init_arch_info(target, cortex_a, target->tap);
 }
 
 static void cortex_a_deinit_target(struct target *target)
@@ -3198,7 +3198,6 @@ static void cortex_a_deinit_target(struct target *target)
 	free(cortex_a->brp_list);
 	free(dpm->dbp);
 	free(dpm->dwp);
-	free(target->private_config);
 	free(cortex_a);
 }
 
@@ -3483,7 +3482,6 @@ struct target_type cortexa_target = {
 
 	.commands = cortex_a_command_handlers,
 	.target_create = cortex_a_target_create,
-	.target_jim_configure = adiv5_jim_configure,
 	.init_target = cortex_a_init_target,
 	.examine = cortex_a_examine,
 	.deinit_target = cortex_a_deinit_target,
@@ -3495,6 +3493,13 @@ struct target_type cortexa_target = {
 };
 
 static const struct command_registration cortex_r4_exec_command_handlers[] = {
+	{
+		.name = "cache_info",
+		.handler = cortex_a_handle_cache_info_command,
+		.mode = COMMAND_EXEC,
+		.help = "display information about target caches",
+		.usage = "",
+	},
 	{
 		.name = "dbginit",
 		.handler = cortex_a_handle_dbginit_command,
@@ -3515,6 +3520,9 @@ static const struct command_registration cortex_r4_exec_command_handlers[] = {
 static const struct command_registration cortex_r4_command_handlers[] = {
 	{
 		.chain = arm_command_handlers,
+	},
+	{
+		.chain = armv7a_command_handlers,
 	},
 	{
 		.name = "cortex_r4",
@@ -3559,7 +3567,6 @@ struct target_type cortexr4_target = {
 
 	.commands = cortex_r4_command_handlers,
 	.target_create = cortex_r4_target_create,
-	.target_jim_configure = adiv5_jim_configure,
 	.init_target = cortex_a_init_target,
 	.examine = cortex_a_examine,
 	.deinit_target = cortex_a_deinit_target,

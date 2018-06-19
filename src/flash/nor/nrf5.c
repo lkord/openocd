@@ -155,11 +155,6 @@ static const struct nrf5_device_spec nrf5_known_devices_table[] = {
 	NRF5_DEVICE_DEF(0x0020, "51822", "CEAA", "BA",    256),
 	NRF5_DEVICE_DEF(0x002F, "51822", "CEAA", "B0",    256),
 
-	/* Some early nRF51-DK (PCA10028) & nRF51-Dongle (PCA10031) boards
-	   with built-in jlink seem to use engineering samples not listed
-	   in the nRF51 Series Compatibility Matrix V1.0. */
-	NRF5_DEVICE_DEF(0x0071, "51822", "QFAC", "AB",    256),
-
 	/* nRF51822 Devices (IC rev 2). */
 	NRF5_DEVICE_DEF(0x002A, "51822", "QFAA", "FA0",   256),
 	NRF5_DEVICE_DEF(0x0044, "51822", "QFAA", "GC0",   256),
@@ -180,7 +175,6 @@ static const struct nrf5_device_spec nrf5_known_devices_table[] = {
 	NRF5_DEVICE_DEF(0x007D, "51822", "CDAB", "A0",    128),
 	NRF5_DEVICE_DEF(0x0079, "51822", "CEAA", "E0",    256),
 	NRF5_DEVICE_DEF(0x0087, "51822", "CFAC", "A0",    256),
-	NRF5_DEVICE_DEF(0x008F, "51822", "QFAA", "H1",    256),
 
 	/* nRF51422 Devices (IC rev 1). */
 	NRF5_DEVICE_DEF(0x001E, "51422", "QFAA", "CA",    256),
@@ -204,6 +198,11 @@ static const struct nrf5_device_spec nrf5_known_devices_table[] = {
 
 	/* nRF52832 Devices */
 	NRF5_DEVICE_DEF(0x00C7, "52832", "QFAA", "B0",    512),
+
+	/* Some early nRF51-DK (PCA10028) & nRF51-Dongle (PCA10031) boards
+	   with built-in jlink seem to use engineering samples not listed
+	   in the nRF51 Series Compatibility Matrix V1.0. */
+	NRF5_DEVICE_DEF(0x0071, "51822", "QFAC", "AB",    256),
 };
 
 static int nrf5_bank_is_probed(struct flash_bank *bank)
@@ -531,6 +530,7 @@ static int nrf5_probe(struct flash_bank *bank)
 		bank->sectors[0].size = bank->size;
 		bank->sectors[0].offset	= 0;
 
+		/* mark as unknown */
 		bank->sectors[0].is_erased = 0;
 		bank->sectors[0].is_protected = 0;
 
@@ -550,6 +550,17 @@ static int nrf5_auto_probe(struct flash_bank *bank)
 		return ERROR_OK;
 	else
 		return nrf5_probe(bank);
+}
+
+static struct flash_sector *nrf5_find_sector_by_address(struct flash_bank *bank, uint32_t address)
+{
+	struct nrf5_info *chip = bank->driver_priv;
+
+	for (int i = 0; i < bank->num_sectors; i++)
+		if (bank->sectors[i].offset <= address &&
+		    address < (bank->sectors[i].offset + chip->code_page_size))
+			return &bank->sectors[i];
+	return NULL;
 }
 
 static int nrf5_erase_all(struct nrf5_info *chip)
@@ -602,6 +613,9 @@ static int nrf5_erase_page(struct flash_bank *bank,
 					       NRF5_NVMC_ERASEPAGE,
 					       sector->offset);
 	}
+
+	if (res == ERROR_OK)
+		sector->is_erased = 1;
 
 	return res;
 }
@@ -728,9 +742,34 @@ static int nrf5_write_pages(struct flash_bank *bank, uint32_t start, uint32_t en
 {
 	int res = ERROR_FAIL;
 	struct nrf5_info *chip = bank->driver_priv;
+	struct flash_sector *sector;
+	uint32_t offset;
 
 	assert(start % chip->code_page_size == 0);
 	assert(end % chip->code_page_size == 0);
+
+	/* Erase all sectors */
+	for (offset = start; offset < end; offset += chip->code_page_size) {
+		sector = nrf5_find_sector_by_address(bank, offset);
+		if (!sector) {
+			LOG_ERROR("Invalid sector @ 0x%08"PRIx32, offset);
+			return ERROR_FLASH_SECTOR_INVALID;
+		}
+
+		if (sector->is_protected) {
+			LOG_ERROR("Can't erase protected sector @ 0x%08"PRIx32, offset);
+			goto error;
+		}
+
+		if (sector->is_erased != 1) {	/* 1 = erased, 0= not erased, -1 = unknown */
+			res = nrf5_erase_page(bank, chip, sector);
+			if (res != ERROR_OK) {
+				LOG_ERROR("Failed to erase sector @ 0x%08"PRIx32, sector->offset);
+				goto error;
+			}
+		}
+		sector->is_erased = 0;
+	}
 
 	res = nrf5_nvmc_write_enable(chip);
 	if (res != ERROR_OK)
@@ -738,12 +777,13 @@ static int nrf5_write_pages(struct flash_bank *bank, uint32_t start, uint32_t en
 
 	res = nrf5_ll_flash_write(chip, start, buffer, (end - start));
 	if (res != ERROR_OK)
-		goto error;
+		goto set_read_only;
 
 	return nrf5_nvmc_read_only(chip);
 
-error:
+set_read_only:
 	nrf5_nvmc_read_only(chip);
+error:
 	LOG_ERROR("Failed to write to nrf5 flash");
 	return res;
 }
@@ -835,9 +875,11 @@ static int nrf5_uicr_flash_write(struct flash_bank *bank,
 	if (res != ERROR_OK)
 		return res;
 
-	res = nrf5_erase_page(bank, chip, sector);
-	if (res != ERROR_OK)
-		return res;
+	if (sector->is_erased != 1) {
+		res = nrf5_erase_page(bank, chip, sector);
+		if (res != ERROR_OK)
+			return res;
+	}
 
 	res = nrf5_nvmc_write_enable(chip);
 	if (res != ERROR_OK)
@@ -949,6 +991,9 @@ COMMAND_HANDLER(nrf5_handle_mass_erase_command)
 		return res;
 	}
 
+	for (int i = 0; i < bank->num_sectors; i++)
+		bank->sectors[i].is_erased = 1;
+
 	res = nrf5_protect_check(bank);
 	if (res != ERROR_OK) {
 		LOG_ERROR("Failed to check chip's write protection");
@@ -958,6 +1003,8 @@ COMMAND_HANDLER(nrf5_handle_mass_erase_command)
 	res = get_flash_bank_by_addr(target, NRF5_UICR_BASE, true, &bank);
 	if (res != ERROR_OK)
 		return res;
+
+	bank->sectors[0].is_erased = 1;
 
 	return ERROR_OK;
 }

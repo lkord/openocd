@@ -78,8 +78,6 @@
 
  CYBL10x6x, CY8C4127_BL, CY8C4247_BL Programming Specifications
 	Document No. 001-91508 Rev. *B September 22, 2014
-
- http://dmitry.gr/index.php?r=05.Projects&proj=24.%20PSoC4%20confidential
 */
 
 /* register locations */
@@ -99,7 +97,7 @@
 
 
 /* constants */
-#define PSOC4_SFLASH_MACRO_SIZE		0x800
+#define PSOC4_SFLASH_MACRO_SIZE		0x400
 #define PSOC4_ROWS_PER_MACRO		512
 
 #define PSOC4_SROM_KEY1			0xb6
@@ -276,8 +274,8 @@ static int psoc4_sysreq(struct flash_bank *bank, uint8_t cmd,
 	}
 
 	if (sysreq_params_size) {
-		LOG_DEBUG("SYSREQ %02" PRIx8 " %04" PRIx16 " %08" PRIx32 " size %" PRIu32,
-			cmd, cmd_param, param1, sysreq_params_size);
+		LOG_DEBUG("SYSREQ %02" PRIx8 " %04" PRIx16 " %08" PRIx32 " %08" PRIx32 " size %" PRIu32,
+			cmd, cmd_param, param1, sysreq_params[0], sysreq_params_size);
 		/* Allocate memory for sysreq_params */
 		retval = target_alloc_working_area(target, sysreq_params_size, &sysreq_mem);
 		if (retval != ERROR_OK) {
@@ -323,7 +321,6 @@ static int psoc4_sysreq(struct flash_bank *bank, uint8_t cmd,
 	if (armv7m == NULL) {
 		/* something is very wrong if armv7m is NULL */
 		LOG_ERROR("unable to get armv7m target");
-		retval = ERROR_FAIL;
 		goto cleanup;
 	}
 
@@ -567,7 +564,7 @@ static int psoc4_protect(struct flash_bank *bank, int set, int first, int last)
 	uint32_t *sysrq_buffer = NULL;
 	const int param_sz = 8;
 	int chip_prot = PSOC4_CHIP_PROT_OPEN;
-	int i, m, sect;
+	int i, m;
 	int num_bits = bank->num_sectors;
 
 	if (num_bits > PSOC4_ROWS_PER_MACRO)
@@ -575,7 +572,7 @@ static int psoc4_protect(struct flash_bank *bank, int set, int first, int last)
 
 	int prot_sz = num_bits / 8;
 
-	sysrq_buffer = malloc(param_sz + prot_sz);
+	sysrq_buffer = calloc(1, param_sz + prot_sz);
 	if (sysrq_buffer == NULL) {
 		LOG_ERROR("no memory for row buffer");
 		return ERROR_FAIL;
@@ -584,11 +581,10 @@ static int psoc4_protect(struct flash_bank *bank, int set, int first, int last)
 	for (i = first; i <= last && i < bank->num_sectors; i++)
 		bank->sectors[i].is_protected = set;
 
-	for (m = 0, sect = 0; m < psoc4_info->num_macros; m++) {
+	for (m = 0; m < psoc4_info->num_macros; m++) {
 		uint8_t *p = (uint8_t *)(sysrq_buffer + 2);
-		memset(p, 0, prot_sz);
-		for (i = 0; i < num_bits && sect < bank->num_sectors; i++, sect++) {
-			if (bank->sectors[sect].is_protected)
+		for (i = 0; i < num_bits && i < bank->num_sectors; i++) {
+			if (bank->sectors[i].is_protected)
 				p[i/8] |= 1 << (i%8);
 		}
 
@@ -598,7 +594,7 @@ static int psoc4_protect(struct flash_bank *bank, int set, int first, int last)
 		retval = psoc4_sysreq(bank, PSOC4_CMD_LOAD_LATCH,
 			0	/* Byte number in latch from what to write */
 			  | (m << 8), /* flash macro index */
-			sysrq_buffer, param_sz + prot_sz,
+			sysrq_buffer, param_sz + psoc4_info->row_size,
 			NULL);
 		if (retval != ERROR_OK)
 			break;
@@ -721,22 +717,6 @@ cleanup:
 }
 
 
-/* Due to Cypress's method of market segmentation some devices
- * have accessible only 1/2, 1/4 or 1/8 of SPCIF described flash */
-static int psoc4_test_flash_wounding(struct target *target, uint32_t flash_size)
-{
-	int retval, i;
-	for (i = 3; i >= 1; i--) {
-		uint32_t addr = flash_size >> i;
-		uint32_t dummy;
-		retval = target_read_u32(target, addr, &dummy);
-		if (retval != ERROR_OK)
-			return i;
-	}
-	return 0;
-}
-
-
 static int psoc4_probe(struct flash_bank *bank)
 {
 	struct psoc4_flash_bank *psoc4_info = bank->driver_priv;
@@ -817,15 +797,6 @@ static int psoc4_probe(struct flash_bank *bank)
 	/* check number of flash macros */
 	if (num_macros != (num_rows + PSOC4_ROWS_PER_MACRO - 1) / PSOC4_ROWS_PER_MACRO)
 		LOG_WARNING("Number of macros does not correspond with flash size!");
-
-	if (!psoc4_info->legacy_family) {
-		int wounding = psoc4_test_flash_wounding(target, num_rows * row_size);
-		if (wounding > 0) {
-			flash_size_in_kb = flash_size_in_kb >> wounding;
-			num_rows = num_rows >> wounding;
-			LOG_INFO("WOUNDING detected: accessible flash size %" PRIu32 " kbytes", flash_size_in_kb);
-		}
-	}
 
 	if (bank->sectors) {
 		free(bank->sectors);
@@ -963,5 +934,4 @@ struct flash_driver psoc4_flash = {
 	.erase_check = default_flash_blank_check,
 	.protect_check = psoc4_protect_check,
 	.info = get_psoc4_info,
-	.free_driver_priv = default_flash_free_driver_priv,
 };

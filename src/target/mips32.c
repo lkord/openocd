@@ -827,8 +827,7 @@ int mips32_checksum_memory(struct target *target, target_addr_t address,
 
 /** Checks whether a memory region is erased. */
 int mips32_blank_check_memory(struct target *target,
-		struct target_memory_check_block *blocks, int num_blocks,
-		uint8_t erased_value)
+		target_addr_t address, uint32_t count, uint32_t *blank, uint8_t erased_value)
 {
 	struct working_area *erase_check_algorithm;
 	struct reg_param reg_params[3];
@@ -867,16 +866,16 @@ int mips32_blank_check_memory(struct target *target,
 	int retval = target_write_buffer(target, erase_check_algorithm->address,
 						sizeof(erase_check_code), erase_check_code_8);
 	if (retval != ERROR_OK)
-		goto cleanup;
+		return retval;
 
 	mips32_info.common_magic = MIPS32_COMMON_MAGIC;
 	mips32_info.isa_mode = isa ? MIPS32_ISA_MMIPS32 : MIPS32_ISA_MIPS32;
 
 	init_reg_param(&reg_params[0], "r4", 32, PARAM_OUT);
-	buf_set_u32(reg_params[0].value, 0, 32, blocks[0].address);
+	buf_set_u32(reg_params[0].value, 0, 32, address);
 
 	init_reg_param(&reg_params[1], "r5", 32, PARAM_OUT);
-	buf_set_u32(reg_params[1].value, 0, 32, blocks[0].size);
+	buf_set_u32(reg_params[1].value, 0, 32, count);
 
 	init_reg_param(&reg_params[2], "r6", 32, PARAM_IN_OUT);
 	buf_set_u32(reg_params[2].value, 0, 32, erased_value);
@@ -885,19 +884,15 @@ int mips32_blank_check_memory(struct target *target,
 			erase_check_algorithm->address + (sizeof(erase_check_code) - 4), 10000, &mips32_info);
 
 	if (retval == ERROR_OK)
-		blocks[0].result = buf_get_u32(reg_params[2].value, 0, 32);
+		*blank = buf_get_u32(reg_params[2].value, 0, 32);
 
 	destroy_reg_param(&reg_params[0]);
 	destroy_reg_param(&reg_params[1]);
 	destroy_reg_param(&reg_params[2]);
 
-cleanup:
 	target_free_working_area(target, erase_check_algorithm);
 
-	if (retval != ERROR_OK)
-		return retval;
-
-	return 1;       /* only one block has been checked */
+	return retval;
 }
 
 static int mips32_verify_pointer(struct command_context *cmd_ctx,

@@ -136,6 +136,5 @@ struct flash_driver faux_flash = {
 	.auto_probe = faux_probe,
 	.erase_check = default_flash_blank_check,
 	.protect_check = faux_protect_check,
-	.info = faux_info,
-	.free_driver_priv = default_flash_free_driver_priv,
+	.info = faux_info
 };

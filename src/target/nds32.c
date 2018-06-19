@@ -2339,66 +2339,63 @@ int nds32_get_gdb_fileio_info(struct target *target, struct gdb_fileio_info *fil
 		fileio_info->identifier = NULL;
 	}
 
-	uint32_t reg_r0, reg_r1, reg_r2;
-	nds32_get_mapped_reg(nds32, R0, &reg_r0);
-	nds32_get_mapped_reg(nds32, R1, &reg_r1);
-	nds32_get_mapped_reg(nds32, R2, &reg_r2);
-
 	switch (syscall_id) {
 		case NDS32_SYSCALL_EXIT:
 			fileio_info->identifier = malloc(5);
 			sprintf(fileio_info->identifier, "exit");
-			fileio_info->param_1 = reg_r0;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 			break;
 		case NDS32_SYSCALL_OPEN:
 			{
 				uint8_t filename[256];
 				fileio_info->identifier = malloc(5);
 				sprintf(fileio_info->identifier, "open");
-				fileio_info->param_1 = reg_r0;
+				nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 				/* reserve fileio_info->param_2 for length of path */
-				fileio_info->param_3 = reg_r1;
-				fileio_info->param_4 = reg_r2;
+				nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_3));
+				nds32_get_mapped_reg(nds32, R2, &(fileio_info->param_4));
 
-				target->type->read_buffer(target, reg_r0, 256, filename);
+				target->type->read_buffer(target, fileio_info->param_1,
+						256, filename);
 				fileio_info->param_2 = strlen((char *)filename) + 1;
 			}
 			break;
 		case NDS32_SYSCALL_CLOSE:
 			fileio_info->identifier = malloc(6);
 			sprintf(fileio_info->identifier, "close");
-			fileio_info->param_1 = reg_r0;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 			break;
 		case NDS32_SYSCALL_READ:
 			fileio_info->identifier = malloc(5);
 			sprintf(fileio_info->identifier, "read");
-			fileio_info->param_1 = reg_r0;
-			fileio_info->param_2 = reg_r1;
-			fileio_info->param_3 = reg_r2;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
+			nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_2));
+			nds32_get_mapped_reg(nds32, R2, &(fileio_info->param_3));
 			break;
 		case NDS32_SYSCALL_WRITE:
 			fileio_info->identifier = malloc(6);
 			sprintf(fileio_info->identifier, "write");
-			fileio_info->param_1 = reg_r0;
-			fileio_info->param_2 = reg_r1;
-			fileio_info->param_3 = reg_r2;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
+			nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_2));
+			nds32_get_mapped_reg(nds32, R2, &(fileio_info->param_3));
 			break;
 		case NDS32_SYSCALL_LSEEK:
 			fileio_info->identifier = malloc(6);
 			sprintf(fileio_info->identifier, "lseek");
-			fileio_info->param_1 = reg_r0;
-			fileio_info->param_2 = reg_r1;
-			fileio_info->param_3 = reg_r2;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
+			nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_2));
+			nds32_get_mapped_reg(nds32, R2, &(fileio_info->param_3));
 			break;
 		case NDS32_SYSCALL_UNLINK:
 			{
 				uint8_t filename[256];
 				fileio_info->identifier = malloc(7);
 				sprintf(fileio_info->identifier, "unlink");
-				fileio_info->param_1 = reg_r0;
+				nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 				/* reserve fileio_info->param_2 for length of path */
 
-				target->type->read_buffer(target, reg_r0, 256, filename);
+				target->type->read_buffer(target, fileio_info->param_1,
+						256, filename);
 				fileio_info->param_2 = strlen((char *)filename) + 1;
 			}
 			break;
@@ -2407,57 +2404,61 @@ int nds32_get_gdb_fileio_info(struct target *target, struct gdb_fileio_info *fil
 				uint8_t filename[256];
 				fileio_info->identifier = malloc(7);
 				sprintf(fileio_info->identifier, "rename");
-				fileio_info->param_1 = reg_r0;
+				nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 				/* reserve fileio_info->param_2 for length of old path */
-				fileio_info->param_3 = reg_r1;
+				nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_3));
 				/* reserve fileio_info->param_4 for length of new path */
 
-				target->type->read_buffer(target, reg_r0, 256, filename);
+				target->type->read_buffer(target, fileio_info->param_1,
+						256, filename);
 				fileio_info->param_2 = strlen((char *)filename) + 1;
 
-				target->type->read_buffer(target, reg_r1, 256, filename);
+				target->type->read_buffer(target, fileio_info->param_3,
+						256, filename);
 				fileio_info->param_4 = strlen((char *)filename) + 1;
 			}
 			break;
 		case NDS32_SYSCALL_FSTAT:
 			fileio_info->identifier = malloc(6);
 			sprintf(fileio_info->identifier, "fstat");
-			fileio_info->param_1 = reg_r0;
-			fileio_info->param_2 = reg_r1;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
+			nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_2));
 			break;
 		case NDS32_SYSCALL_STAT:
 			{
 				uint8_t filename[256];
 				fileio_info->identifier = malloc(5);
 				sprintf(fileio_info->identifier, "stat");
-				fileio_info->param_1 = reg_r0;
+				nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 				/* reserve fileio_info->param_2 for length of old path */
-				fileio_info->param_3 = reg_r1;
+				nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_3));
 
-				target->type->read_buffer(target, reg_r0, 256, filename);
+				target->type->read_buffer(target, fileio_info->param_1,
+						256, filename);
 				fileio_info->param_2 = strlen((char *)filename) + 1;
 			}
 			break;
 		case NDS32_SYSCALL_GETTIMEOFDAY:
 			fileio_info->identifier = malloc(13);
 			sprintf(fileio_info->identifier, "gettimeofday");
-			fileio_info->param_1 = reg_r0;
-			fileio_info->param_2 = reg_r1;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
+			nds32_get_mapped_reg(nds32, R1, &(fileio_info->param_2));
 			break;
 		case NDS32_SYSCALL_ISATTY:
 			fileio_info->identifier = malloc(7);
 			sprintf(fileio_info->identifier, "isatty");
-			fileio_info->param_1 = reg_r0;
+			nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 			break;
 		case NDS32_SYSCALL_SYSTEM:
 			{
 				uint8_t command[256];
 				fileio_info->identifier = malloc(7);
 				sprintf(fileio_info->identifier, "system");
-				fileio_info->param_1 = reg_r0;
+				nds32_get_mapped_reg(nds32, R0, &(fileio_info->param_1));
 				/* reserve fileio_info->param_2 for length of old path */
 
-				target->type->read_buffer(target, reg_r0, 256, command);
+				target->type->read_buffer(target, fileio_info->param_1,
+						256, command);
 				fileio_info->param_2 = strlen((char *)command) + 1;
 			}
 			break;

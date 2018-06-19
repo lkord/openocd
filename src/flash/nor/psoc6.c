@@ -1,6 +1,6 @@
 /***************************************************************************
  *                                                                         *
- *   Copyright (C) 2018 by Bohdan Tymkiv                                   *
+ *   Copyright (C) 2017 by Bohdan Tymkiv                                   *
  *   bohdan.tymkiv@cypress.com bohdan200@gmail.com                         *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
@@ -101,7 +101,7 @@ struct row_region {
 	size_t size;
 };
 
-static const struct row_region safe_sflash_regions[] = {
+static struct row_region safe_sflash_regions[] = {
 	{0x16000800, 0x800},	/* SFLASH: User Data */
 	{0x16001A00, 0x200},	/* SFLASH: NAR */
 	{0x16005A00, 0xC00},	/* SFLASH: Public Key */
@@ -111,12 +111,8 @@ static const struct row_region safe_sflash_regions[] = {
 #define SFLASH_NUM_REGIONS (sizeof(safe_sflash_regions) / sizeof(safe_sflash_regions[0]))
 
 static struct working_area *g_stack_area;
-static struct armv7m_algorithm g_armv7m_info;
-
-/** ***********************************************************************************************
- * @brief Initializes `struct timeout` structure with given timeout value
- * @param to pointer to `struct timeout` structure
- * @param timeout_ms timeout, in milliseconds
+/**************************************************************************************************
+ * Initializes timeout_s structure with given timeout in milliseconds
  *************************************************************************************************/
 static void timeout_init(struct timeout *to, long timeout_ms)
 {
@@ -124,23 +120,17 @@ static void timeout_init(struct timeout *to, long timeout_ms)
 	to->timeout_ms = timeout_ms;
 }
 
-/** ***********************************************************************************************
- * @brief Returns true if given `struct timeout` structure has expired
- * @param to pointer to `struct timeout` structure
- * @return true if timeout expired
+/**************************************************************************************************
+ * Returns true if given timeout_s object has expired
  *************************************************************************************************/
 static bool timeout_expired(struct timeout *to)
 {
 	return (timeval_ms() - to->start_time) > to->timeout_ms;
 }
 
-/** ***********************************************************************************************
- * @brief Starts pseudo flash algorithm and leaves it running. Function allocates working area for
- * algorithm code and CPU stack, adjusts stack pointer, uploads and starts the algorithm.
- * Algorithm (a basic infinite loop) runs asynchronously while driver performs Flash operations.
- *
- * @param target target for the algorithm
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Prepares PSoC6 for running pseudo flash algorithm. This function allocates Working Area for
+ * the algorithm and for CPU Stack.
  *************************************************************************************************/
 static int sromalgo_prepare(struct target *target)
 {
@@ -151,92 +141,88 @@ static int sromalgo_prepare(struct target *target)
 	if (hr != ERROR_OK)
 		return hr;
 
-	/* Restore THUMB bit in xPSR register */
-	const struct armv7m_common *cm = target_to_armv7m(target);
-	hr = cm->store_core_reg_u32(target, ARMV7M_xPSR, 0x01000000);
-	if (hr != ERROR_OK)
-		return hr;
-
 	/* Allocate Working Area for Stack and Flash algorithm */
 	hr = target_alloc_working_area(target, RAM_STACK_WA_SIZE, &g_stack_area);
 	if (hr != ERROR_OK)
 		return hr;
 
-	g_armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
-	g_armv7m_info.core_mode = ARM_MODE_THREAD;
+	/* Restore THUMB bit in xPSR register */
+	const struct armv7m_common *cm = target_to_armv7m(target);
+	hr = cm->store_core_reg_u32(target, ARMV7M_xPSR, 0x01000000);
+	if (hr != ERROR_OK)
+		goto exit_free_wa;
+
+	return ERROR_OK;
+
+exit_free_wa:
+	/* Something went wrong, free allocated area */
+	if (g_stack_area) {
+		target_free_working_area(target, g_stack_area);
+		g_stack_area = NULL;
+	}
+
+	return hr;
+}
+
+/**************************************************************************************************
+ * Releases working area
+ *************************************************************************************************/
+static int sromalgo_release(struct target *target)
+{
+	int hr = ERROR_OK;
+
+	/* Free Stack/Flash algorithm working area */
+	if (g_stack_area) {
+		hr = target_free_working_area(target, g_stack_area);
+		g_stack_area = NULL;
+	}
+
+	return hr;
+}
+
+/**************************************************************************************************
+ * Runs pseudo flash algorithm. Algorithm itself consist of couple of NOPs followed by BKPT
+ * instruction. The trick here is that NMI has already been posted to CM0 via IPC structure
+ * prior to calling this function. CM0 will immediately jump to NMI handler and execute
+ * SROM API code.
+ * This approach is borrowed from PSoC4 Flash Driver.
+ *************************************************************************************************/
+static int sromalgo_run(struct target *target)
+{
+	int hr;
+
+	struct armv7m_algorithm armv7m_info;
+	armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
+	armv7m_info.core_mode = ARM_MODE_THREAD;
 
 	struct reg_param reg_params;
 	init_reg_param(&reg_params, "sp", 32, PARAM_OUT);
 	buf_set_u32(reg_params.value, 0, 32, g_stack_area->address + g_stack_area->size);
 
-	/* Write basic infinite loop algorithm to target RAM */
-	hr = target_write_u32(target, g_stack_area->address, 0xFEE7FEE7);
+	/* mov r8, r8; mov r8, r8 */
+	hr = target_write_u32(target, g_stack_area->address + 0, 0x46C046C0);
 	if (hr != ERROR_OK)
-		goto destroy_rp_free_wa;
+		return hr;
 
-	hr = target_start_algorithm(target, 0, NULL, 1, &reg_params, g_stack_area->address,
-			0, &g_armv7m_info);
+	/* mov r8, r8; bkpt #0    */
+	hr = target_write_u32(target, g_stack_area->address + 4, 0xBE0046C0);
 	if (hr != ERROR_OK)
-		goto destroy_rp_free_wa;
+		return hr;
+
+	hr = target_run_algorithm(target, 0, NULL, 1, &reg_params, g_stack_area->address,
+			0, SROMAPI_CALL_TIMEOUT_MS, &armv7m_info);
 
 	destroy_reg_param(&reg_params);
 
 	return hr;
-
-destroy_rp_free_wa:
-	/* Something went wrong, do some cleanup */
-	destroy_reg_param(&reg_params);
-
-	if (g_stack_area) {
-		target_free_working_area(target, g_stack_area);
-		g_stack_area = NULL;
-	}
-
-	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Stops running flash algorithm and releases associated resources.
- * This function is also used for cleanup in case of errors so g_stack_area may be NULL.
- * These cases have to be handled gracefully.
- *
- * @param target current target
- *************************************************************************************************/
-static void sromalgo_release(struct target *target)
-{
-	int hr = ERROR_OK;
-
-	if (g_stack_area) {
-		/* Stop flash algorithm if it is running */
-		if (target->running_alg) {
-			hr = target_halt(target);
-			if (hr != ERROR_OK)
-				goto exit_free_wa;
-
-			hr = target_wait_algorithm(target, 0, NULL, 0, NULL, 0,
-					IPC_TIMEOUT_MS, &g_armv7m_info);
-			if (hr != ERROR_OK)
-				goto exit_free_wa;
-		}
-
-exit_free_wa:
-		/* Free Stack/Flash algorithm working area */
-		target_free_working_area(target, g_stack_area);
-		g_stack_area = NULL;
-	}
-}
-
-/** ***********************************************************************************************
- * @brief Waits for expected IPC lock status. PSoC6 uses IPC structures for inter-core
- * communication. Same IPCs are used to invoke SROM API. IPC structure must be locked prior to
- * invoking any SROM API. This ensures nothing else in the system will use same IPC thus corrupting
- * our data. Locking is performed by ipc_acquire(), this function ensures that IPC is actually
- * in expected state
- *
- * @param target current target
- * @param ipc_id IPC index to poll. IPC #2 is dedicated for DAP access
- * @param lock_expected expected lock status
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Waits for expected IPC lock status.
+ * PSoC6 uses IPC structures for inter-core communication. Same IPCs are used to invoke SROM API.
+ * IPC structure must be locked prior to invoking any SROM API. This ensures nothing else in the
+ * system will use same IPC thus corrupting our data. Locking is performed by ipc_acquire(), this
+ * function ensures that IPC is actually in expected state
  *************************************************************************************************/
 static int ipc_poll_lock_stat(struct target *target, uint32_t ipc_id, bool lock_expected)
 {
@@ -272,15 +258,11 @@ static int ipc_poll_lock_stat(struct target *target, uint32_t ipc_id, bool lock_
 	return ERROR_TARGET_TIMEOUT;
 }
 
-/** ***********************************************************************************************
- * @brief Acquires IPC structure. PSoC6 uses IPC structures for inter-core communication.
- * Same IPCs are used to invoke SROM API. IPC structure must be locked prior to invoking any SROM API.
- * This ensures nothing else in the system will use same IPC thus corrupting our data.
- * This function locks the IPC.
- *
- * @param target current target
- * @param ipc_id ipc_id IPC index to acquire. IPC #2 is dedicated for DAP access
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Acquires IPC structure
+ * PSoC6 uses IPC structures for inter-core communication. Same IPCs are used to invoke SROM API.
+ * IPC structure must be locked prior to invoking any SROM API. This ensures nothing else in the
+ * system will use same IPC thus corrupting our data. This function locks the IPC.
  *************************************************************************************************/
 static int ipc_acquire(struct target *target, char ipc_id)
 {
@@ -321,14 +303,8 @@ static int ipc_acquire(struct target *target, char ipc_id)
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Invokes SROM API functions which are responsible for Flash operations
- *
- * @param target current target
- * @param req_and_params requect id of the function to invoke
- * @param working_area address of memory buffer in target's memory space for SROM API parameters
- * @param data_out pointer to variable which will be populated with execution status
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Invokes SROM API functions which are responsible for Flash operations
  *************************************************************************************************/
 static int call_sromapi(struct target *target,
 	uint32_t req_and_params,
@@ -360,6 +336,10 @@ static int call_sromapi(struct target *target,
 	if (hr != ERROR_OK)
 		return hr;
 
+	hr = sromalgo_run(target);
+	if (hr != ERROR_OK)
+		return hr;
+
 	/* Poll lock status */
 	hr = ipc_poll_lock_stat(target, IPC_ID, false);
 	if (hr != ERROR_OK)
@@ -385,12 +365,8 @@ static int call_sromapi(struct target *target,
 	return ERROR_OK;
 }
 
-/** ***********************************************************************************************
- * @brief Retrieves SiliconID and Protection status of the target device
- * @param target current target
- * @param si_id pointer to variable, will be populated with SiliconID
- * @param protection pointer to variable, will be populated with protection status
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Retrieves SiliconID and Protection status of the target device
  *************************************************************************************************/
 static int get_silicon_id(struct target *target, uint32_t *si_id, uint8_t *protection)
 {
@@ -399,17 +375,17 @@ static int get_silicon_id(struct target *target, uint32_t *si_id, uint8_t *prote
 
 	hr = sromalgo_prepare(target);
 	if (hr != ERROR_OK)
-		goto exit;
+		return hr;
 
 	/* Read FamilyID and Revision */
 	hr = call_sromapi(target, SROMAPI_SIID_REQ_FAMILY_REVISION, 0, &family_rev);
 	if (hr != ERROR_OK)
-		goto exit;
+		return hr;
 
 	/* Read SiliconID and Protection */
 	hr = call_sromapi(target, SROMAPI_SIID_REQ_SIID_PROTECTION, 0, &siid_prot);
 	if (hr != ERROR_OK)
-		goto exit;
+		return hr;
 
 	*si_id  = (siid_prot & 0x0000FFFF) << 16;
 	*si_id |= (family_rev & 0x00FF0000) >> 8;
@@ -417,15 +393,12 @@ static int get_silicon_id(struct target *target, uint32_t *si_id, uint8_t *prote
 
 	*protection = (siid_prot & 0x000F0000) >> 0x10;
 
-exit:
-	sromalgo_release(target);
-	return ERROR_OK;
+	hr = sromalgo_release(target);
+	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Translates Protection status to openocd-friendly boolean value
- * @param bank current flash bank
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Translates Protection status to openocd-friendly boolean value
  *************************************************************************************************/
 static int psoc6_protect_check(struct flash_bank *bank)
 {
@@ -456,9 +429,8 @@ static int psoc6_protect_check(struct flash_bank *bank)
 	return ERROR_OK;
 }
 
-/** ***********************************************************************************************
- * @brief Dummy function, Life Cycle transition is not currently supported
- * @return ERROR_OK always
+/**************************************************************************************************
+ * Life Cycle transition is not currently supported
  *************************************************************************************************/
 static int psoc6_protect(struct flash_bank *bank, int set, int first, int last)
 {
@@ -471,10 +443,8 @@ static int psoc6_protect(struct flash_bank *bank, int set, int first, int last)
 	return ERROR_OK;
 }
 
-/** ***********************************************************************************************
- * @brief Translates Protection status to string
- * @param protection protection value
- * @return pointer to const string describintg protection status
+/**************************************************************************************************
+ * Translates Protection status to string
  *************************************************************************************************/
 static const char *protection_to_str(uint8_t protection)
 {
@@ -498,12 +468,8 @@ static const char *protection_to_str(uint8_t protection)
 	}
 }
 
-/** ***********************************************************************************************
- * @brief psoc6_get_info Displays human-readable information about acquired device
- * @param bank current flash bank
- * @param buf pointer to buffer for human-readable text
- * @param buf_size size of the buffer
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Displays human-readable information about acquired device
  *************************************************************************************************/
 static int psoc6_get_info(struct flash_bank *bank, char *buf, int buf_size)
 {
@@ -528,10 +494,8 @@ static int psoc6_get_info(struct flash_bank *bank, char *buf, int buf_size)
 	return ERROR_OK;
 }
 
-/** ***********************************************************************************************
- * @brief Checks if given flash bank belongs to Supervisory Flash
- * @param bank current flash bank
- * @return true if flash bank belongs to Supervisory Flash
+/**************************************************************************************************
+ * Returns true if flash bank name represents Supervisory Flash
  *************************************************************************************************/
 static bool is_sflash_bank(struct flash_bank *bank)
 {
@@ -543,33 +507,27 @@ static bool is_sflash_bank(struct flash_bank *bank)
 	return false;
 }
 
-/** ***********************************************************************************************
- * @brief Checks if given flash bank belongs to Work Flash
- * @param bank current flash bank
- * @return true if flash bank belongs to Work Flash
+/**************************************************************************************************
+ * Returns true if flash bank name represents Work Flash
  *************************************************************************************************/
 static inline bool is_wflash_bank(struct flash_bank *bank)
 {
 	return (bank->base == MEM_BASE_WFLASH);
 }
 
-/** ***********************************************************************************************
- * @brief Checks if given flash bank belongs to Main Flash
- * @param bank current flash bank
- * @return true if flash bank belongs to Main Flash
+/**************************************************************************************************
+ * Returns true if flash bank name represents Main Flash
  *************************************************************************************************/
 static inline bool is_mflash_bank(struct flash_bank *bank)
 {
 	return (bank->base == MEM_BASE_MFLASH);
 }
 
-/** ***********************************************************************************************
- * @brief Probes the device and populates related data structures with target flash geometry data.
+/**************************************************************************************************
+ * Probes the device and populates related data structures with target flash geometry data.
  * This is done in non-intrusive way, no SROM API calls are involved so GDB can safely attach to a
- * running target. Function assumes that size of Work Flash is 32kB (true for all current part numbers)
- *
- * @param bank current flash bank
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+ * running target.
+ * Function assumes that size of Work Flash is 32kB (true for all current part numbers)
  *************************************************************************************************/
 static int psoc6_probe(struct flash_bank *bank)
 {
@@ -637,10 +595,8 @@ static int psoc6_probe(struct flash_bank *bank)
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Probes target device only if it hasn't been probed yet
- * @param bank current flash bank
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Probes target device only if it hasn't been probed yet
  *************************************************************************************************/
 static int psoc6_auto_probe(struct flash_bank *bank)
 {
@@ -655,12 +611,8 @@ static int psoc6_auto_probe(struct flash_bank *bank)
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Erases single sector (256k) on target device
- * @param bank current flash bank
- * @param wa working area for SROM API parameters
- * @param addr starting address of the sector
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Erases single sector (256k) on target device
  *************************************************************************************************/
 static int psoc6_erase_sector(struct flash_bank *bank, struct working_area *wa, uint32_t addr)
 {
@@ -684,12 +636,8 @@ static int psoc6_erase_sector(struct flash_bank *bank, struct working_area *wa, 
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Erases single row (512b) on target device
- * @param bank current flash bank
- * @param wa working area for SROM API parameters
- * @param addr starting address of the flash row
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Erases single row (512b) on target device
  *************************************************************************************************/
 static int psoc6_erase_row(struct flash_bank *bank, struct working_area *wa, uint32_t addr)
 {
@@ -713,14 +661,9 @@ static int psoc6_erase_row(struct flash_bank *bank, struct working_area *wa, uin
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Performs Erase operation. Function will try to use biggest erase block possible to
- * speedup the operation.
- *
- * @param bank current flash bank
- * @param first first sector to erase
- * @param last last sector to erase
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Performs Erase operation.
+ * Function will try to use biggest erase block possible to speedup the operation
  *************************************************************************************************/
 static int psoc6_erase(struct flash_bank *bank, int first, int last)
 {
@@ -738,7 +681,7 @@ static int psoc6_erase(struct flash_bank *bank, int first, int last)
 
 	hr = sromalgo_prepare(target);
 	if (hr != ERROR_OK)
-		goto exit;
+		return hr;
 
 	hr = target_alloc_working_area(target, psoc6_info->row_sz + 32, &wa);
 	if (hr != ERROR_OK)
@@ -777,13 +720,9 @@ exit:
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Programs single Flash Row
- * @param bank current flash bank
- * @param addr address of the flash row
- * @param buffer pointer to the buffer with data
- * @param is_sflash true if current flash bank belongs to Supervisory Flash
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+
+/**************************************************************************************************
+ * Programs single Flash Row
  *************************************************************************************************/
 static int psoc6_program_row(struct flash_bank *bank,
 	uint32_t addr,
@@ -834,13 +773,9 @@ exit:
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Performs Program operation
- * @param bank current flash bank
- * @param buffer pointer to the buffer with data
- * @param offset starting offset in falsh bank
- * @param count number of bytes in buffer
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+
+/**************************************************************************************************
+ * Programs set of Rows
  *************************************************************************************************/
 static int psoc6_program(struct flash_bank *bank,
 	const uint8_t *buffer,
@@ -852,11 +787,11 @@ static int psoc6_program(struct flash_bank *bank,
 	const bool is_sflash = is_sflash_bank(bank);
 	int hr;
 
-	uint8_t page_buf[psoc6_info->row_sz];
-
 	hr = sromalgo_prepare(target);
 	if (hr != ERROR_OK)
-		goto exit;
+		return hr;
+
+	uint8_t page_buf[psoc6_info->row_sz];
 
 	while (count) {
 		uint32_t row_offset = offset % psoc6_info->row_sz;
@@ -869,7 +804,7 @@ static int psoc6_program(struct flash_bank *bank,
 		hr = psoc6_program_row(bank, aligned_addr, page_buf, is_sflash);
 		if (hr != ERROR_OK) {
 			LOG_ERROR("Failed to program Flash at address 0x%08X", aligned_addr);
-			goto exit;
+			break;
 		}
 
 		buffer += row_bytes;
@@ -877,15 +812,13 @@ static int psoc6_program(struct flash_bank *bank,
 		count -= row_bytes;
 	}
 
-exit:
-	sromalgo_release(target);
+	hr = sromalgo_release(target);
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Performs Mass Erase operation
- * @param bank flash bank index to erase
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
+/**************************************************************************************************
+ * Performs Mass Erase of given flash bank
+ * Syntax: psoc6 mass_erase bank_id
  *************************************************************************************************/
 COMMAND_HANDLER(psoc6_handle_mass_erase_command)
 {
@@ -902,16 +835,13 @@ COMMAND_HANDLER(psoc6_handle_mass_erase_command)
 	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Simulates broken Vector Catch
+/**************************************************************************************************
+ * Simulates broken Vector Catch
  * Function will try to determine entry point of user application. If it succeeds it will set HW
  * breakpoint at that address, issue SW Reset and remove the breakpoint afterwards.
  * In case of CM0, SYSRESETREQ is used. This allows to reset all peripherals. Boot code will
  * reset CM4 anyway, so using SYSRESETREQ is safe here.
  * In case of CM4, VECTRESET is used instead of SYSRESETREQ to not disturb CM0 core.
- *
- * @param target current target
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
  *************************************************************************************************/
 int handle_reset_halt(struct target *target)
 {
@@ -959,42 +889,33 @@ int handle_reset_halt(struct target *target)
 
 	const struct armv7m_common *cm = target_to_armv7m(target);
 
-	/* PSoC6 reboots immediatelly after issuing SYSRESETREQ / VECTRESET
-	 * this disables SWD/JTAG pins momentarily and may break communication
-	 * Ignoring return value of mem_ap_write_atomic_u32 seems to be ok here */
 	if (is_cm0) {
 		/* Reset the CM0 by asserting SYSRESETREQ. This will also reset CM4 */
 		LOG_INFO("psoc6.cm0: bkpt @0x%08X, issuing SYSRESETREQ", reset_addr);
-		mem_ap_write_atomic_u32(cm->debug_ap, NVIC_AIRCR,
-			AIRCR_VECTKEY | AIRCR_SYSRESETREQ);
+		hr = mem_ap_write_atomic_u32(cm->debug_ap,
+				NVIC_AIRCR,
+				AIRCR_VECTKEY | AIRCR_SYSRESETREQ);
+
+		/* Wait for bootcode and initialize DAP */
+		usleep(3000);
+		dap_dp_init(cm->debug_ap->dap);
 	} else {
 		LOG_INFO("psoc6.cm4: bkpt @0x%08X, issuing VECTRESET", reset_addr);
-		mem_ap_write_atomic_u32(cm->debug_ap, NVIC_AIRCR,
-			AIRCR_VECTKEY | AIRCR_VECTRESET);
+		hr = mem_ap_write_atomic_u32(cm->debug_ap,
+				NVIC_AIRCR,
+				AIRCR_VECTKEY | AIRCR_VECTRESET);
+		if (hr != ERROR_OK)
+			return hr;
 	}
-
-	/* Wait 100ms for bootcode and reinitialize DAP */
-	usleep(100000);
-	dap_dp_init(cm->debug_ap->dap);
 
 	target_wait_state(target, TARGET_HALTED, IPC_TIMEOUT_MS);
 
 	/* Remove the break point */
 	breakpoint_remove(target, reset_addr);
 
-	return ERROR_OK;
+	return hr;
 }
 
-/** ***********************************************************************************************
- * @brief Simulates broken Vector Catch
- * Function will try to determine entry point of user application. If it succeeds it will set HW
- * breakpoint at that address, issue SW Reset and remove the breakpoint afterwards.
- * In case of CM0, SYSRESETREQ is used. This allows to reset all peripherals. Boot code will
- * reset CM4 anyway, so using SYSRESETREQ is safe here.
- * In case of CM4, VECTRESET is used instead of SYSRESETREQ to not disturb CM0 core.
- *
- * @return ERROR_OK in case of success, ERROR_XXX code otherwise
- *************************************************************************************************/
 COMMAND_HANDLER(psoc6_handle_reset_halt)
 {
 	if (CMD_ARGC)
@@ -1024,7 +945,7 @@ static const struct command_registration psoc6_exec_command_handlers[] = {
 		.name = "mass_erase",
 		.handler = psoc6_handle_mass_erase_command,
 		.mode = COMMAND_EXEC,
-		.usage = "bank",
+		.usage = NULL,
 		.help = "Erases entire Main Flash",
 	},
 	{
@@ -1061,5 +982,4 @@ struct flash_driver psoc6_flash = {
 	.erase_check = default_flash_blank_check,
 	.protect_check = psoc6_protect_check,
 	.info = psoc6_get_info,
-	.free_driver_priv = default_flash_free_driver_priv,
 };

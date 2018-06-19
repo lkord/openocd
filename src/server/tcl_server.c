@@ -157,7 +157,7 @@ static int tcl_new_connection(struct connection *connection)
 
 	connection->priv = tclc;
 
-	struct target *target = get_current_target(connection->cmd_ctx);
+	struct target *target = get_target_by_num(connection->cmd_ctx->current_target);
 	if (target != NULL)
 		tclc->tc_laststate = target->state;
 
@@ -358,9 +358,4 @@ int tcl_register_commands(struct command_context *cmd_ctx)
 {
 	tcl_port = strdup("6666");
 	return register_commands(cmd_ctx, NULL, tcl_command_handlers);
-}
-
-void tcl_service_free(void)
-{
-	free(tcl_port);
 }

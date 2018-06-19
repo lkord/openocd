@@ -546,5 +546,4 @@ struct flash_driver xmc1xxx_flash = {
 	.erase = xmc1xxx_erase,
 	.erase_check = xmc1xxx_erase_check,
 	.write = xmc1xxx_write,
-	.free_driver_priv = default_flash_free_driver_priv,
 };

@@ -69,9 +69,10 @@ struct ChibiOS_chdebug {
 /**
  * @brief ChibiOS thread states.
  */
-static const char * const ChibiOS_thread_states[] = { "READY", "CURRENT",
-"WTSTART", "SUSPENDED", "QUEUED", "WTSEM", "WTMTX", "WTCOND", "SLEEPING",
-"WTEXIT", "WTOREVT", "WTANDEVT", "SNDMSGQ", "SNDMSG", "WTMSG", "FINAL"
+static const char * const ChibiOS_thread_states[] = {
+	"READY", "CURRENT", "SUSPENDED", "WTSEM", "WTMTX", "WTCOND", "SLEEPING",
+	"WTEXIT", "WTOREVT", "WTANDEVT", "SNDMSGQ", "SNDMSG", "WTMSG", "WTQUEUE",
+	"FINAL"
 };
 
 #define CHIBIOS_NUM_STATES (sizeof(ChibiOS_thread_states)/sizeof(char *))
@@ -246,7 +247,7 @@ static int ChibiOS_update_stacking(struct rtos *rtos)
 	/* Check for armv7m with *enabled* FPU, i.e. a Cortex-M4  */
 	struct armv7m_common *armv7m_target = target_to_armv7m(rtos->target);
 	if (is_armv7m(armv7m_target)) {
-		if (armv7m_target->fp_feature != FP_NONE) {
+		if (armv7m_target->fp_feature == FPv4_SP) {
 			/* Found ARM v7m target which includes a FPU */
 			uint32_t cpacr;
 
